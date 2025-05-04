@@ -1,1026 +1,1040 @@
 import sys
-import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
-from PIL import Image, ImageTk
-import cv2
 import os
+import cv2
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QGraphicsView, QGraphicsScene,
+                             QGraphicsRectItem, QGraphicsTextItem, QAction,
+                             QFileDialog, QMessageBox, QSizePolicy, QFrame,
+                             QToolBar, QLabel, QSlider, QStyle, QPushButton,
+                             QScrollArea, QMenu) # Added QMenu for context menu
+from PyQt5.QtGui import QColor, QBrush, QPen, QFont, QPainter, QImage, QPixmap, QIcon, QTransform, QDrag
+from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer, QTime, QUrl, QMimeData, QByteArray, QDataStream, QIODevice, pyqtSignal
 
-class VideoEditorApp:
-    def __init__(self, root):
+# Import the new PyQtTimelineView component
+from pyqt_timeline import PyQtTimelineView, PyQtTimelineClip # Assuming pyqt_timeline.py is in the same directory
+
+# You will need to install PyQt5: pip install PyQt5
+# You might also need to install opencv-python: pip install opencv-python
+# And Pillow: pip install Pillow
+
+class VideoEditorApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
         self.project_path = os.path.dirname(os.path.abspath(__file__))
-        self.root = root
-        self.root.title("Simple Video Editor")
-        self.root.geometry("1280x720")
-        self.root.configure(bg="#232323")
-        self.root.minsize(1100, 600)
-        
+        self.setWindowTitle("Simple Video Editor (PyQt)")
+        self.setGeometry(100, 100, 1280, 720)
+        self.setMinimumSize(1100, 600)
+
         # Initialize collections
-        self.thumbnails = []
-        self.thumbnail_labels = []
-        self.timeline_clips = []
-        self.timeline_scale = 100  # pixels per second
+        self.thumbnail_widgets = [] # Store thumbnail widgets (PyQt)
 
         # Video playback variables
-        self.current_video = None
+        self.current_video = None # OpenCV VideoCapture object
+        self.current_video_path = None
         self.video_playing = False
-        self.current_frame = None
+        self.current_frame = None # QPixmap or QImage for the current frame
         self.frame_count = 0
         self.current_frame_pos = 0
         self.fps = 0
-        
-        # Top menu bar (dark)
-        menu_bar = tk.Menu(root, bg="#181818", fg="#fff", activebackground="#2d2d2d", activeforeground="#fff", bd=0, relief="flat")
-        root.config(menu=menu_bar)
-        file_menu = tk.Menu(menu_bar, tearoff=0, bg="#181818", fg="#fff", activebackground="#2d2d2d", activeforeground="#fff")
-        file_menu.add_command(label="Import Video", command=self.import_video)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=root.quit)
-        menu_bar.add_cascade(label="File", menu=file_menu)
-        menu_bar.add_command(label="Reload", command=self.reload_thumbnails)
+        self.video_duration = 0 # Store total video duration in seconds
 
-        # Main layout: 3x2 grid (media | preview+timeline | effects)
-        self.root.grid_rowconfigure(1, weight=1)
-        self.root.grid_columnconfigure(1, weight=2)
-        self.root.grid_columnconfigure(2, weight=1)
+        # Timer for video playback
+        self.video_timer = QTimer(self)
+        self.video_timer.timeout.connect(self.update_video_frame)
+
+
+        # --- Main Layout ---
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
 
         # --- Left: Project/Media Panel ---
-        self.media_panel = tk.Frame(root, bg="#181818", bd=0, highlightbackground="#333", highlightthickness=1)
-        self.media_panel.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.media_panel.grid_propagate(False)
-        self.media_panel.config(width=260)
-        tk.Label(self.media_panel, text="Project", font=("Segoe UI", 12, "bold"), bg="#181818", fg="#fff").pack(anchor="w", padx=12, pady=(10, 2))
-        self.media_canvas = tk.Canvas(self.media_panel, bg="#232323", highlightthickness=0)
-        self.media_scroll = tk.Scrollbar(self.media_panel, orient=tk.VERTICAL, command=self.media_canvas.yview)
-        self.media_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.media_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
-        self.media_canvas.configure(yscrollcommand=self.media_scroll.set)
-        self.media_inner = tk.Frame(self.media_canvas, bg="#232323")
-        self.media_canvas.create_window((0,0), window=self.media_inner, anchor="nw")
-        self.media_inner.bind("<Configure>", lambda e: self.media_canvas.configure(scrollregion=self.media_canvas.bbox("all")))
+        self.media_panel = QFrame(self)
+        self.media_panel.setFrameShape(QFrame.StyledPanel)
+        self.media_panel.setFrameShadow(QFrame.Sunken)
+        self.media_panel.setMinimumWidth(260)
+        self.media_panel.setMaximumWidth(350) # Limit max width
+        media_layout = QVBoxLayout(self.media_panel)
+        media_layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- Center Top: Program/Preview Panel ---
-        self.preview_panel = tk.Frame(root, bg="#181818", bd=0, highlightbackground="#333", highlightthickness=1)
-        self.preview_panel.grid(row=0, column=1, sticky="nsew")
-        tk.Label(self.preview_panel, text="Program", font=("Segoe UI", 12, "bold"), bg="#181818", fg="#fff").pack(anchor="w", padx=12, pady=(10, 2))
-        self.preview_canvas = tk.Canvas(self.preview_panel, bg="#000", width=480, height=270, highlightthickness=0)
-        self.preview_canvas.pack(padx=16, pady=16, fill=tk.BOTH, expand=True)
-        self.preview_canvas.create_text(240, 135, text="Preview", fill="#888", font=("Segoe UI", 20, "bold"))
+        media_header = QLabel("Project", self.media_panel)
+        media_header.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        media_header.setStyleSheet("background-color: #181818; color: #fff; padding: 10px 12px;")
+        media_header.setFixedHeight(40) # Fixed height for header
+        media_layout.addWidget(media_header)
 
-        # --- Center Bottom: Timeline Panel ---
-        self.timeline_panel = tk.Frame(root, bg="#232323", bd=0, highlightbackground="#333", highlightthickness=1, height=140)
-        self.timeline_panel.grid(row=1, column=1, sticky="nsew")
-        self.timeline_panel.grid_propagate(False)
-        
-        # Timeline header
-        tk.Label(self.timeline_panel, text="Timeline", font=("Segoe UI", 12, "bold"), bg="#232323", fg="#fff").pack(anchor="w", padx=12, pady=(10, 2))
-        
-        # Timeline canvas and scrollbar
-        self.timeline_canvas = tk.Canvas(self.timeline_panel, bg="#181818", height=80, highlightthickness=0)
-        self.timeline_scroll = tk.Scrollbar(self.timeline_panel, orient=tk.HORIZONTAL, command=self.timeline_canvas.xview)
-        
-        # Pack scrollbar and canvas
-        self.timeline_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.timeline_canvas.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
-        
-        # Configure canvas scroll
-        self.timeline_canvas.configure(xscrollcommand=self.timeline_scroll.set)
-        
-        # Create timeline inner frame
-        self.timeline_inner = tk.Frame(self.timeline_canvas, bg="#181818")
-        self.timeline_window = self.timeline_canvas.create_window(
-            (0, 0), 
-            window=self.timeline_inner, 
-            anchor="nw",
-            width=self.timeline_canvas.winfo_width(),
-            height=self.timeline_canvas.winfo_height()
-        )
-        
-        # Bind timeline events
-        self.timeline_inner.bind("<Configure>", self.on_timeline_configure)
-        self.timeline_canvas.bind("<Configure>", self.on_timeline_canvas_configure)
-        
-        # Enable drag from thumbnails
-        for container in self.thumbnail_labels:
-            self.enable_drag(container)
+        # Scroll area for thumbnails
+        self.media_scroll_area = QScrollArea(self.media_panel)
+        self.media_scroll_area.setWidgetResizable(True)
+        self.media_scroll_area_content = QWidget()
+        # Use QVBoxLayout for list arrangement
+        self.media_scroll_area_layout = QVBoxLayout(self.media_scroll_area_content)
+        self.media_scroll_area_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter) # Align items to top-center
+        self.media_scroll_area.setWidget(self.media_scroll_area_content)
+        media_layout.addWidget(self.media_scroll_area)
 
-        # Create preview controls
-        self.preview_controls = tk.Frame(self.preview_panel, bg="#181818")
-        self.preview_controls.pack(fill=tk.X, padx=16, pady=8)
-        
-        # Create play/pause button
-        self.play_button = tk.Button(self.preview_controls, text="▶", command=self.toggle_play,
-                                   bg="#2d2d2d", fg="white", width=3, relief="flat")
-        self.play_button.pack(side=tk.LEFT, padx=5)
-        
-        # Create time slider
-        self.time_slider = ttk.Scale(self.preview_controls, from_=0, to=100,
-                                   orient=tk.HORIZONTAL, command=self.on_slider_change)
-        self.time_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        
-        # Create time label
-        self.time_label = tk.Label(self.preview_controls, text="00:00 / 00:00",
-                                 bg="#181818", fg="white")
-        self.time_label.pack(side=tk.LEFT, padx=5)
-        
-        # Schedule the first frame update
-        self.root.after(33, self.update_video_frame)  # ~30 FPS
 
-    def enable_drag(self, container):
-        """Enable drag and drop for a thumbnail container"""
-        container.bind('<ButtonPress-1>', self.on_drag_start_thumbnail)
-        container.bind('<B1-Motion>', self.on_drag_motion_thumbnail)
-        container.bind('<ButtonRelease-1>', self.on_drag_stop_thumbnail)
-        
-        # Enable for all child widgets too
-        for child in container.winfo_children():
-            child.bind('<ButtonPress-1>', self.on_drag_start_thumbnail)
-            child.bind('<B1-Motion>', self.on_drag_motion_thumbnail)
-            child.bind('<ButtonRelease-1>', self.on_drag_stop_thumbnail)
+        main_layout.addWidget(self.media_panel)
 
-    def on_drag_start_thumbnail(self, event):
-        """Start dragging a thumbnail"""
-        if not hasattr(self, 'dragging_thumbnail'):
-            widget = event.widget
-            # Get the container if we clicked a child widget
-            if not widget in self.thumbnail_labels:
-                widget = widget.master
-            if widget in self.thumbnail_labels:
-                self.dragging_thumbnail = widget
-                self.drag_start_x = event.x_root
-                self.drag_start_y = event.y_root
-                
-                # Create drag preview
-                self.drag_preview = tk.Toplevel(self.root)
-                self.drag_preview.overrideredirect(1)
-                self.drag_preview.attributes('-alpha', 0.7)
-                
-                # Copy thumbnail image to preview
-                image_label = widget.winfo_children()[0]
-                preview_label = tk.Label(self.drag_preview, image=image_label.image)
-                preview_label.pack()
-                
-                # Position preview at mouse
-                self.drag_preview.geometry(f"+{event.x_root}+{event.y_root}")
+        # --- Center: Preview and Timeline ---
+        center_layout = QVBoxLayout()
 
-    def on_drag_motion_thumbnail(self, event):
-        """Update drag preview position"""
-        if hasattr(self, 'drag_preview') and self.drag_preview:
-            # Move preview with mouse
-            x = event.x_root
-            y = event.y_root
-            self.drag_preview.geometry(f"+{x}+{y}")
-            
-            # Check if we're over the timeline
-            timeline_bbox = self.timeline_canvas.bbox("all")
-            if timeline_bbox:
-                tx = self.timeline_canvas.winfo_rootx()
-                ty = self.timeline_canvas.winfo_rooty()
-                if tx <= x <= tx + self.timeline_canvas.winfo_width() and \
-                   ty <= y <= ty + self.timeline_canvas.winfo_height():
-                    self.timeline_canvas.configure(bg="#2a2a2a")  # Highlight drop zone
-                else:
-                    self.timeline_canvas.configure(bg="#181818")  # Reset background
+        # Center Top: Program/Preview Panel
+        self.preview_panel = QFrame(self)
+        self.preview_panel.setFrameShape(QFrame.StyledPanel)
+        self.preview_panel.setFrameShadow(QFrame.Sunken)
+        preview_layout = QVBoxLayout(self.preview_panel)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
 
-    def on_drag_stop_thumbnail(self, event):
-        """Handle dropping a thumbnail"""
-        if hasattr(self, 'drag_preview') and self.drag_preview:
-            try:
-                # Check if we're over the timeline
-                x = event.x_root
-                y = event.y_root
-                tx = self.timeline_canvas.winfo_rootx()
-                ty = self.timeline_canvas.winfo_rooty()
-                
-                if (tx <= x <= tx + self.timeline_canvas.winfo_width() and
-                    ty <= y <= ty + self.timeline_canvas.winfo_height()):
-                    # Convert screen coordinates to canvas coordinates
-                    canvas_x = self.timeline_canvas.canvasx(x - tx)
-                    self.add_clip_to_timeline(self.dragging_thumbnail, canvas_x)
-                    print(f"Dropped at canvas_x: {canvas_x}")  # Debug info
-            except Exception as e:
-                print(f"Error in on_drag_stop_thumbnail: {e}")  # Debug info
-                
-            # Clean up
-            self.drag_preview.destroy()
-            del self.drag_preview
-            self.timeline_canvas.configure(bg="#181818")
-            if hasattr(self, 'dragging_thumbnail'):
-                del self.dragging_thumbnail
+        preview_header = QLabel("Program", self.preview_panel)
+        preview_header.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        preview_header.setStyleSheet("background-color: #181818; color: #fff; padding: 10px 12px;")
+        preview_header.setFixedHeight(40) # Fixed height for header
+        preview_layout.addWidget(preview_header)
 
-    def add_clip_to_timeline(self, thumbnail_container, x_pos):
-        """Add video clip to timeline"""
-        try:
-            # Get video info
-            name_label = thumbnail_container.winfo_children()[1]
-            filename = name_label.cget("text")
-            video_path = os.path.join(self.project_path, filename)
-            
-            # Create clip container
-            clip_frame = tk.Frame(self.timeline_inner, bg="#2d2d2d", bd=1, relief="solid")
-            
-            # Get video duration
-            cap = cv2.VideoCapture(video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            duration = frame_count / fps if fps > 0 else 0
-            cap.release()
-            
-            # Set minimum width for very short clips
-            clip_width = max(100, int(duration * self.timeline_scale))
-            clip_frame.configure(width=clip_width)
-            
-            # Add thumbnail
-            image_label = thumbnail_container.winfo_children()[0]
-            clip_thumb = tk.Label(clip_frame, image=image_label.image, bg="#2d2d2d")
-            clip_thumb.image = image_label.image  # Keep reference
-            clip_thumb.pack(side=tk.LEFT, padx=2, pady=2)
-            
-            # Add filename label
-            clip_label = tk.Label(clip_frame, text=filename, bg="#2d2d2d", fg="white")
-            clip_label.pack(side=tk.LEFT, padx=2)
-            
-            # Calculate grid-snapped position
-            grid_size = 10
-            x_pos = max(0, round(x_pos / grid_size) * grid_size)
-            
-            # Position clip in timeline
-            clip_frame.place(x=x_pos, y=10, height=60)
-            
-            # Store clip info
-            clip_info = {
-                'widget': clip_frame,
-                'filename': filename,
-                'start_time': x_pos / self.timeline_scale,
-                'duration': duration,
-                'path': video_path
+        # Preview area (QLabel to display frames)
+        self.preview_label = QLabel("Preview", self.preview_panel)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet("background-color: #000; color: #888; font-size: 20pt; font-weight: bold;")
+        self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_layout.addWidget(self.preview_label)
+
+        # Preview controls
+        self.preview_controls = QFrame(self.preview_panel)
+        self.preview_controls.setStyleSheet("background-color: #181818;")
+        preview_controls_layout = QHBoxLayout(self.preview_controls)
+
+        # Play/Pause button
+        self.play_button = QPushButton(self.preview_controls)
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay)) # Set initial icon
+        self.play_button.clicked.connect(self.toggle_play)
+        self.play_button.setFixedSize(30, 30) # Fixed size for button
+        preview_controls_layout.addWidget(self.play_button)
+
+        # Time slider
+        self.time_slider = QSlider(Qt.Horizontal, self.preview_controls)
+        self.time_slider.setRange(0, 0) # Initial range
+        self.time_slider.sliderMoved.connect(self.on_slider_change_time)
+        preview_controls_layout.addWidget(self.time_slider)
+
+        # Time label
+        self.time_label = QLabel("00:00 / 00:00", self.preview_controls)
+        self.time_label.setStyleSheet("color: white;")
+        preview_controls_layout.addWidget(self.time_label)
+
+        preview_layout.addWidget(self.preview_controls)
+
+        center_layout.addWidget(self.preview_panel, 2) # Stretch preview panel
+
+        # Center Bottom: Timeline Panel (using PyQtTimelineView)
+        self.timeline_view = PyQtTimelineView(self) # Create an instance of the PyQt timeline view
+        self.timeline_view.setMinimumHeight(160)
+        # Connect signals from the timeline view to slots in the main app
+        self.timeline_view.playheadMoved.connect(self.on_playhead_move)
+        self.timeline_view.clipDoubleClicked.connect(self.load_clip_into_preview)
+        self.timeline_view.clipRightClicked.connect(self.show_timeline_clip_context_menu) # Connect right-click signal
+        self.timeline_view.selectionChanged.connect(self.on_timeline_selection_changed) # Connect selection change signal
+
+        center_layout.addWidget(self.timeline_view, 1) # Stretch timeline panel
+
+        main_layout.addLayout(center_layout, 3) # Stretch center section
+
+        # --- Right: Effects Panel (Placeholder) ---
+        self.effects_panel = QFrame(self)
+        self.effects_panel.setFrameShape(QFrame.StyledPanel)
+        self.effects_panel.setFrameShadow(QFrame.Sunken)
+        self.effects_panel.setMinimumWidth(200)
+        self.effects_panel.setMaximumWidth(300) # Limit max width
+        effects_layout = QVBoxLayout(self.effects_panel)
+        effects_layout.setContentsMargins(0, 0, 0, 0)
+
+        effects_header = QLabel("Effects", self.effects_panel)
+        effects_header.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        effects_header.setStyleSheet("background-color: #181818; color: #fff; padding: 10px 12px;")
+        effects_header.setFixedHeight(40) # Fixed height for header
+        effects_layout.addWidget(effects_header)
+
+        effects_content = QLabel("Effects Panel (Coming Soon)", self.effects_panel)
+        effects_content.setAlignment(Qt.AlignCenter)
+        effects_content.setStyleSheet("color: #888;")
+        effects_layout.addWidget(effects_content)
+
+
+        main_layout.addWidget(self.effects_panel)
+
+        # --- Menu Bar ---
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("File")
+        import_action = QAction("Import Video", self)
+        import_action.triggered.connect(self.import_video)
+        file_menu.addAction(import_action)
+
+        export_action = QAction("Export Timeline", self)
+        export_action.triggered.connect(self.export_timeline)
+        file_menu.addAction(export_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # --- Style (Optional: Dark Theme) ---
+        self.setStyleSheet("""
+            QMainWindow { background-color: #232323; }
+            QFrame { background-color: #232323; border: 1px solid #333; }
+            QLabel { color: white; }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #444;
+                padding: 5px;
+                border-radius: 3px;
             }
-            self.timeline_clips.append(clip_info)
-            
-            # Enable dragging within timeline
-            clip_frame.bind('<Button-1>', lambda e, c=clip_frame: self.start_clip_drag(e, c))
-            clip_frame.bind('<B1-Motion>', lambda e, c=clip_frame: self.drag_clip(e, c))
-            clip_frame.bind('<ButtonRelease-1>', lambda e, c=clip_frame: self.stop_clip_drag(e, c))
-            
-            # Update scrollregion
-            self.update_timeline_scrollregion()
-            
-            print(f"Added clip: {filename} at x={x_pos}")  # Debug info
-            
-        except Exception as e:
-            print(f"Error adding clip to timeline: {e}")  # Debug info
-            messagebox.showerror("Error", f"Failed to add clip to timeline: {e}")
+            QPushButton:hover { background-color: #3a3a3a; }
+            QPushButton:pressed { background-color: #1a1a1a; }
+            QSlider::groove:horizontal {
+                border: 1px solid #444;
+                height: 8px;
+                background: #333;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #00aaff;
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0; /* handle is placed on top of the groove */
+                border-radius: 9px;
+            }
+             QScrollArea { border: none; } # Remove border from scroll area
+             QWidget#media_scroll_area_content { background-color: #232323; } # Set background for content widget
+        """)
 
-    def start_clip_drag(self, event, clip):
-        """Start dragging a timeline clip"""
-        clip.drag_start_x = event.x_root
-        clip.drag_start_y = event.y_root
-        clip.original_x = clip.winfo_x()
-        clip.lift()  # Bring to front
+        # Connect keyboard shortcuts (example: Delete selected clips)
+        delete_action = QAction(self)
+        delete_action.setShortcut(Qt.Key_Delete)
+        delete_action.triggered.connect(self.delete_selected_timeline_clips)
+        self.addAction(delete_action)
 
-    def drag_clip(self, event, clip):
-        """Drag a timeline clip"""
-        if hasattr(clip, 'drag_start_x'):
-            dx = event.x_root - clip.drag_start_x
-            new_x = max(0, clip.original_x + dx)
-            
-            # Snap to grid
-            grid_size = 10
-            new_x = round(new_x / grid_size) * grid_size
-            
-            clip.place(x=new_x)
-            
-            # Update timeline scroll region while dragging
-            self.update_timeline_scrollregion()
-
-    def stop_clip_drag(self, event, clip):
-        """Stop dragging a timeline clip"""
-        if hasattr(clip, 'drag_start_x'):
-            # Update clip info with new position
-            new_x = clip.winfo_x()
-            for clip_info in self.timeline_clips:
-                if clip_info['widget'] == clip:
-                    clip_info['start_time'] = new_x / self.timeline_scale
-                    break
-                    
-            # Clean up drag attributes
-            del clip.drag_start_x
-            del clip.drag_start_y
-            del clip.original_x
-            
-            self.update_timeline_scrollregion()
-
-    def update_timeline_scrollregion(self):
-        """Update the timeline canvas scroll region"""
-        if not self.timeline_clips:
-            return
-            
-        # Find rightmost edge of all clips
-        max_x = 0
-        for clip_info in self.timeline_clips:
-            clip = clip_info['widget']
-            clip_right = clip.winfo_x() + clip.winfo_width()
-            max_x = max(max_x, clip_right)
-        
-        # Add some padding
-        max_x += 100
-        
-        # Update scroll region
-        self.timeline_canvas.configure(scrollregion=(0, 0, max_x, self.timeline_canvas.winfo_height()))
-
-    def on_timeline_configure(self, event):
-        """Handle timeline canvas resize"""
-        self.update_timeline_scrollregion()
-
-    def on_timeline_canvas_configure(self, event):
-        """Handle timeline canvas resize"""
-        # Update timeline window size when canvas is resized
-        self.timeline_canvas.itemconfig(
-            self.timeline_window,
-            width=max(self.timeline_canvas.winfo_width(), 
-                     self.timeline_inner.winfo_reqwidth()),
-            height=max(self.timeline_canvas.winfo_height(),
-                      self.timeline_inner.winfo_reqheight())
-        )
-        # Update scroll region
-        self.update_timeline_scrollregion()
-
-    def update_overlay_size(self, event=None):
-        """Update the selection overlay size when media_inner size changes"""
-        if hasattr(self, 'selection_overlay'):
-            self.selection_overlay.configure(
-                width=self.media_inner.winfo_width(),
-                height=self.media_inner.winfo_height()
-            )
-
-    def arrange_thumbnails(self, event=None):
-        if not self.thumbnail_labels:
-            return
-        # Get the width of the canvas
-        canvas_width = self.media_canvas.winfo_width()
-        if canvas_width == 1:
-            return
-        # Thumbnail size + padding
-        thumb_width = 150 + 10  # 150 width + 5 padding each side
-        # Calculate number of columns that fit
-        cols = max(1, canvas_width // thumb_width)
-        # Arrange thumbnails in grid
-        for index, label in enumerate(self.thumbnail_labels):
-            row = index // cols
-            col = index % cols
-            label.grid_configure(row=row, column=col, padx=5, pady=5)
-
-    def get_columns(self):
-        canvas_width = self.media_canvas.winfo_width()
-        thumb_width = 150 + 10
-        return max(1, canvas_width // thumb_width)
 
     def import_video(self):
-        filetypes = (
-            ("Video files", "*.mp4 *.avi *.mov *.mkv"),
-            ("All files", "*.*")
-        )
-        filepaths = filedialog.askopenfilenames(title="Open Video Files", filetypes=filetypes)
+        """Import video files to the project bin (media panel)."""
+        filetypes = "Video files (*.mp4 *.avi *.mov *.mkv);;All files (*.*)"
+        filepaths, _ = QFileDialog.getOpenFileNames(self, "Open Video Files", "", filetypes)
         if filepaths:
             for filepath in filepaths:
                 self.add_thumbnail(filepath)
-        else:
-            messagebox.showinfo("Import Cancelled", "No video file was selected.")
-
-    def show_control_context_menu(self, event):
-        pass
-
-    def create_new_folder_in_project(self):
-        # Prompt user for folder name
-        folder_name = tk.simpledialog.askstring("Create New Folder", "Enter folder name:")
-        if folder_name:
-            folder_path = os.path.join(self.project_path, folder_name)
-            try:
-                os.makedirs(folder_path, exist_ok=True)
-                messagebox.showinfo("Success", f"Folder '{folder_name}' created successfully.")
-
-                # Add folder icon to the UI
-                self.add_folder_icon(folder_name, folder_path)
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to create folder: {e}")
-
-    def add_folder_icon(self, folder_name, folder_path):
-        # Load folder icon
-        folder_icon_path = os.path.join("icons", "folder_icon (64x64).png")
-        try:
-            folder_image = Image.open(folder_icon_path)
-            folder_image = folder_image.resize((32, 32), Image.LANCZOS)
-            folder_icon = ImageTk.PhotoImage(folder_image)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load folder icon: {e}")
-            return
-
-        # Create folder container in media_inner
-        container = tk.Frame(self.media_inner, bg="#232323", bd=2, relief="solid")
-        row = len(self.thumbnail_labels) // self.get_columns()
-        col = len(self.thumbnail_labels) % self.get_columns()
-        container.grid(row=row, column=col, padx=5, pady=5, sticky="nw")
-
-        # Add folder icon
-        icon_label = tk.Label(container, image=folder_icon, bg="#232323")
-        icon_label.image = folder_icon  # Keep reference
-        icon_label.pack()
-
-        # Add editable folder name label
-        name_var = tk.StringVar(value=folder_name)
-        name_entry = tk.Entry(container, textvariable=name_var, bg="#232323", fg="white", justify="center", bd=0)
-        name_entry.pack()
-
-        # Bind events to handle renaming
-        name_entry.bind("<Return>", lambda e: self.rename_folder(name_var, folder_path))
-        name_entry.bind("<FocusOut>", lambda e: self.rename_folder(name_var, folder_path))
-
-        self.thumbnail_labels.append(container)
-        container.selected = False
-
-    def rename_folder(self, name_var, folder_path):
-        new_name = name_var.get().strip()
-        if new_name and new_name != os.path.basename(folder_path):
-            new_path = os.path.join(os.path.dirname(folder_path), new_name)
-            try:
-                os.rename(folder_path, new_path)
-                # Sau khi đổi tên thành công, unbind các sự kiện để tránh gọi lại
-                entry_widget = None
-                for container in self.thumbnail_labels:
-                    for child in container.winfo_children():
-                        if isinstance(child, tk.Entry) and child.get() == new_name:
-                            entry_widget = child
-                            break
-                if entry_widget:
-                    entry_widget.unbind("<Return>")
-                    entry_widget.unbind("<FocusOut>")
-                # Cập nhật lại folder_path nếu cần dùng tiếp
-                folder_path = new_path
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to rename folder: {e}")
 
     def add_thumbnail(self, video_path):
-        # Extract the first frame of the video using OpenCV
-        cap = cv2.VideoCapture(video_path)
-        
-        success, frame = cap.read()
-        if success:
-            frame = cv2.resize(frame, (150, 100))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame)
-            thumbnail_image = ImageTk.PhotoImage(image)
-        else:
-            image = Image.new('RGB', (150, 100), color='gray')
-            thumbnail_image = ImageTk.PhotoImage(image)
-        
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        duration_sec = frame_count / fps if fps > 0 else 0
-        cap.release()
-
-        # Create thumbnail container with border
-        container = tk.Frame(self.media_inner, bg="#232323", bd=2, relief="solid")
-
-        # Add the container using grid
-        row = len(self.thumbnail_labels) // self.get_columns()
-        col = len(self.thumbnail_labels) % self.get_columns()
-        container.grid(row=row, column=col, padx=5, pady=5, sticky="nw")
-
-        # Thumbnail image label
-        label = tk.Label(container, image=thumbnail_image, bg="#232323")
-        label.image = thumbnail_image  # Keep reference
-        label.pack()
-
-        # Video filename label
-        filename = os.path.basename(video_path)
-        name_label = tk.Label(container, text=filename, bg="#232323", fg="white", wraplength=150)
-        name_label.pack()
-
-        # Duration label
-        minutes = int(duration_sec // 60)
-        seconds = int(duration_sec % 60)
-        duration_str = f"{minutes}:{seconds:02d}"
-        duration_label = tk.Label(container, text=duration_str, bg="#232323", fg="yellow", font=("Arial", 9))
-        duration_label.pack()
-
-        self.thumbnails.append(thumbnail_image)
-        self.thumbnail_labels.append(container)
-        container.selected = False
-
-        # Configure thumbnail interactions
-        container.bind("<Button-1>", self.on_thumbnail_click)
-        container.bind("<B1-Motion>", self.on_thumbnail_drag)
-        container.bind("<ButtonRelease-1>", self.on_thumbnail_release)
-        
-        # Enable for child widgets too
-        for child in container.winfo_children():
-            child.bind("<Button-1>", self.on_thumbnail_click)
-            child.bind("<B1-Motion>", self.on_thumbnail_drag)
-            child.bind("<ButtonRelease-1>", self.on_thumbnail_release)
-        
-        # Configure hover and selection effects
-        container.bind("<Enter>", lambda e, c=container: self.on_hover_enter(e, c))
-        container.bind("<Leave>", lambda e, c=container: self.on_hover_leave(e, c))
-        container.bind("<Button-3>", lambda e, c=container: self.show_context_menu(e, c))
-
-        self.arrange_thumbnails()
-
-    def show_empty_space_context_menu(self, event):
-        # Check if click is in empty space in media_canvas
-        clicked_widget = self.media_canvas.find_closest(
-            self.media_canvas.canvasx(event.x),
-            self.media_canvas.canvasy(event.y)
-        )
-        if not clicked_widget or not self.media_canvas.gettags(clicked_widget[0]):
-            menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(label="Create New Folder", command=self.create_new_folder_in_project)
-            menu.tk_popup(event.x_root, event.y_root)
-
-    def select_all_items(self, event=None):
-        """Select all thumbnails"""
-        for container in self.thumbnail_labels:
-            if not container.selected:
-                self.toggle_selection(container)
-
-    def sort_items(self, by="name"):
-        if not self.thumbnail_labels:
-            return
-            
-        if by == "name":
-            sorted_items = sorted(self.thumbnail_labels, 
-                key=lambda x: x.winfo_children()[1].cget("text").lower())
-        else:  # by date
-            sorted_items = sorted(self.thumbnail_labels,
-                key=lambda x: os.path.getmtime(x.winfo_children()[1].cget("text")))
-
-        # Reorder items
-        for idx, container in enumerate(sorted_items):
-            row = idx // self.get_columns()
-            col = idx % self.get_columns() 
-            container.grid(row=row, column=col, padx=5, pady=5)
-            
-        self.thumbnail_labels = sorted_items
-
-    def paste_items(self):
-        # Implement clipboard paste functionality
-        pass
-
-    def on_canvas_configure(self, event):
-        self.arrange_thumbnails(event)
-
-    def on_mousewheel(self, event):
-        self.media_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-    def on_hover_enter(self, event, container):
-        if not container.selected:
-            container.configure(bg='#202020')  # Slightly lighter background on hover
-            for child in container.winfo_children():
-                if isinstance(child, tk.Label):
-                    child.configure(bg='#202020')
-
-    def on_hover_leave(self, event, container):
-        if not container.selected:
-            container.configure(bg='#232323')  # Reset to default background
-            for child in container.winfo_children():
-                if isinstance(child, tk.Label):
-                    child.configure(bg='#232323')
-
-    def on_drag_start(self, event):
-        """Start drawing selection rectangle"""
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-        self.dragging = True
-        
-        # Clear previous selection if Ctrl is not pressed
-        if not self.ctrl_pressed:
-            for container in self.thumbnail_labels:
-                if container.selected:
-                    self.toggle_selection(container)
-
-    def on_drag_motion(self, event):
-        """Update selection rectangle as mouse moves"""
-        if not self.dragging:
+        """Add a thumbnail for a video file in the media panel."""
+        if not os.path.exists(video_path):
+            QMessageBox.warning(self, "File Not Found", f"Video file not found: {os.path.basename(video_path)}")
             return
 
-        # Delete previous selection rectangle
-        if self.selection_rect:
-            self.selection_overlay.delete(self.selection_rect)
-
-        # Draw new selection rectangle
-        self.selection_rect = self.selection_overlay.create_rectangle(
-            self.drag_start_x, self.drag_start_y,
-            event.x, event.y,
-            outline='#00a2ff',
-            fill='#00a2ff20'
-        )
-
-        # Check which thumbnails are in the selection
-        selection_bbox = (
-            min(self.drag_start_x, event.x),
-            min(self.drag_start_y, event.y),
-            max(self.drag_start_x, event.x),
-            max(self.drag_start_y, event.y)
-        )
-
-        for container in self.thumbnail_labels:
-            container_bbox = (
-                container.winfo_x(),
-                container.winfo_y(),
-                container.winfo_x() + container.winfo_width(),
-                container.winfo_y() + container.winfo_height()
-            )
-            
-            if self.rectangles_overlap(selection_bbox, container_bbox):
-                if not container.selected:
-                    self.toggle_selection(container)
-            elif not self.ctrl_pressed and container.selected:
-                self.toggle_selection(container)
-
-    def on_drag_release(self, event):
-        """Clean up after selection is complete"""
-        if self.selection_rect:
-            self.selection_overlay.delete(self.selection_rect)
-        self.selection_rect = None
-        self.dragging = False
-
-    def on_ctrl_press(self, event):
-        """Handle Ctrl key press"""
-        self.ctrl_pressed = True
-
-    def on_ctrl_release(self, event):
-        """Handle Ctrl key release"""
-        self.ctrl_pressed = False
-
-    def get_widget_bbox(self, widget):
-        """Get the bounding box of a widget relative to the selection overlay"""
-        x = widget.winfo_x()
-        y = widget.winfo_y()
-        width = widget.winfo_width()
-        height = widget.winfo_height()
-        return (x, y, x + width, y + height)
-
-    def rectangles_overlap(self, rect1, rect2):
-        """Check if two rectangles overlap"""
-        return not (rect1[2] < rect2[0] or  # r1 right < r2 left
-                   rect1[0] > rect2[2] or  # r1 left > r2 right
-                   rect1[3] < rect2[1] or  # r1 bottom < r2 top
-                   rect1[1] > rect2[3])    # r1 top > r2 bottom
-
-    def toggle_selection(self, container):
-        """Toggle selection state of a thumbnail container"""
-        if not hasattr(container, 'selected'):
-            container.selected = False
-        container.selected = not container.selected
-        
-        if container.selected:
-            container.configure(bg='#404040')  # Darker background when selected
-            for child in container.winfo_children():
-                if isinstance(child, (tk.Label, tk.Entry)):
-                    child.configure(bg='#404040')
-        else:
-            container.configure(bg='#232323')  # Reset to default background
-            for child in container.winfo_children():
-                if isinstance(child, (tk.Label, tk.Entry)):
-                    child.configure(bg='#232323')
-
-    def reload_thumbnails(self):
-        # Xóa toàn bộ thumbnail hiện tại
-        for container in self.thumbnail_labels:
-            container.destroy()
-        self.thumbnail_labels.clear()
-        self.thumbnails.clear()
-        # Reload lại các folder trong project
-        if self.project_path and os.path.isdir(self.project_path):
-            for name in os.listdir(self.project_path):
-                path = os.path.join(self.project_path, name)
-                if os.path.isdir(path):
-                    self.add_folder_icon(name, path)
-        # Reload lại các video (nếu muốn, có thể lọc theo đuôi file video)
-        if self.project_path and os.path.isdir(self.project_path):
-            for name in os.listdir(self.project_path):
-                path = os.path.join(self.project_path, name)
-                if os.path.isfile(path) and name.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
-                    self.add_thumbnail(path)
-        self.arrange_thumbnails()
-
-    def show_context_menu(self, event, container):
-        """Show context menu for thumbnail items"""
-        # Select the item if not already selected
-        if not getattr(container, 'selected', False):
-            self.toggle_selection(container)
-
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.configure(bg='#2d2d2d', fg='white', activebackground='#404040', activeforeground='white')
-        
-        # Count selected items
-        selected_count = sum(1 for c in self.thumbnail_labels if getattr(c, 'selected', False))
-        
-        if selected_count > 1:
-            menu.add_command(label=f"Delete {selected_count} items", 
-                           command=lambda: self.delete_selected_items())
-        else:
-            name_label = container.winfo_children()[1]
-            filename = name_label.cget("text")
-            menu.add_command(label=f"Preview {filename}", 
-                           command=lambda: self.open_video_preview(filename))
-            menu.add_command(label=f"Open {filename}", 
-                           command=lambda: self.open_media(filename))
-            menu.add_command(label="Rename", 
-                           command=lambda: self.rename_media(container))
-            menu.add_separator()
-            menu.add_command(label="Delete", 
-                           command=lambda: self.delete_media(container))
-        
-        menu.add_separator()
-        menu.add_command(label="Select All", command=self.select_all_items)
-        
-        menu.tk_popup(event.x_root, event.y_root)
-
-    def delete_media(self, container):
-        """Delete a media item (folder or video)"""
-        # If it's a folder, delete the folder and its contents
-        name_label = container.winfo_children()[1]
-        folder_name = name_label.cget("text")
-        folder_path = os.path.join(self.project_path, folder_name)
-        if os.path.isdir(folder_path):
-            if messagebox.askyesno("Confirm Delete", f"Delete folder '{folder_name}' and all its contents?"):
-                import shutil
-                shutil.rmtree(folder_path)
-                self.reload_thumbnails()
-        else:
-            # Otherwise, delete the video file
-            if messagebox.askyesno("Confirm Delete", f"Delete video '{folder_name}'?"):
-                os.remove(folder_path)
-                self.reload_thumbnails()
-
-    def open_media(self, filename):
-        """Open the media file with the default application"""
-        file_path = os.path.join(self.project_path, filename)
-        if os.path.isfile(file_path):
-            os.startfile(file_path)
-
-    def rename_media(self, container):
-        """Rename a media item (folder or video)"""
-        name_label = container.winfo_children()[1]
-        current_name = name_label.cget("text")
-        new_name = simpledialog.askstring("Rename", "Enter new name:", initialvalue=current_name)
-        if new_name and new_name != current_name:
-            # Rename logic here (update both UI and filesystem)
-            pass
-
-    def delete_selected_items(self):
-        """Delete all selected items"""
-        selected = [c for c in self.thumbnail_labels if getattr(c, 'selected', False)]
-        if not selected:
-            return
-            
-        if messagebox.askyesno("Confirm Delete", f"Delete {len(selected)} items?"):
-            for container in selected[:]:
-                self.delete_media(container)
-
-    def on_thumbnail_click(self, event):
-        """Handle click on thumbnail"""
-        widget = event.widget
-        # Get container if clicked on child widget
-        if widget not in self.thumbnail_labels:
-            widget = widget.master
-        
-        if widget in self.thumbnail_labels:
-            self.drag_data = {
-                'widget': widget,
-                'start_x': event.x_root,
-                'start_y': event.y_root,
-                'dragging': False
-            }
-            
-            # Handle selection
-            if not event.state & 0x0004:  # If Ctrl not pressed
-                # Deselect others if not dragging
-                for container in self.thumbnail_labels:
-                    if container != widget and container.selected:
-                        self.toggle_selection(container)
-                self.toggle_selection(widget)
-                
-                # Open video in preview
-                filename = widget.winfo_children()[1].cget("text")
-                self.open_video_preview(filename)
-            else:
-                self.toggle_selection(widget)
-
-    def on_thumbnail_drag(self, event):
-        """Handle dragging thumbnail"""
-        if not hasattr(self, 'drag_data') or not self.drag_data:
-            return
-            
-        # Calculate distance moved
-        dx = event.x_root - self.drag_data['start_x']
-        dy = event.y_root - self.drag_data['start_y']
-        distance = (dx ** 2 + dy ** 2) ** 0.5
-        
-        # Start dragging if moved more than 5 pixels
-        if not self.drag_data['dragging'] and distance > 5:
-            self.drag_data['dragging'] = True
-            self.start_drag_preview(event)
-        
-        # Update preview position if dragging
-        if self.drag_data['dragging'] and hasattr(self, 'drag_preview') and self.drag_preview:
-            self.drag_preview.geometry(f"+{event.x_root}+{event.y_root}")
-            
-            # Check if over timeline
-            timeline_bbox = self.timeline_canvas.bbox("all")
-            if timeline_bbox:
-                tx = self.timeline_canvas.winfo_rootx()
-                ty = self.timeline_canvas.winfo_rooty()
-                if (tx <= event.x_root <= tx + self.timeline_canvas.winfo_width() and
-                    ty <= event.y_root <= ty + self.timeline_canvas.winfo_height()):
-                    self.timeline_canvas.configure(bg="#2a2a2a")  # Highlight drop zone
-                else:
-                    self.timeline_canvas.configure(bg="#181818")  # Reset background
-
-    def on_thumbnail_release(self, event):
-        """Handle releasing thumbnail"""
-        if not hasattr(self, 'drag_data') or not self.drag_data or not self.drag_data.get('dragging'):
-            return
-            
         try:
-            # Check if released over timeline
-            timeline_bbox = self.timeline_canvas.bbox("all")
-            if timeline_bbox:
-                tx = self.timeline_canvas.winfo_rootx()
-                ty = self.timeline_canvas.winfo_rooty()
-                if (tx <= event.x_root <= tx + self.timeline_canvas.winfo_width() and
-                    ty <= event.y_root <= ty + self.timeline_canvas.winfo_height()):
-                    # Convert screen coordinates to canvas coordinates
-                    canvas_x = event.x_root - tx
-                    self.add_clip_to_timeline(self.drag_data['widget'], canvas_x)
-                    print(f"Dropped at canvas_x: {canvas_x}")  # Debug info
-            
-            # Clean up drag preview
-            if hasattr(self, 'drag_preview') and self.drag_preview:
-                self.drag_preview.destroy()
-                delattr(self, 'drag_preview')
-            self.timeline_canvas.configure(bg="#181818")
-            
-        except Exception as e:
-            print(f"Error in on_thumbnail_release: {e}")  # Debug info
-        
-        finally:
-            self.drag_data = {}
+            # Extract the first frame of the video using OpenCV
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                QMessageBox.warning(self, "Error", f"Could not open video file: {os.path.basename(video_path)}")
+                return
 
-    def start_drag_preview(self, event):
-        """Create and show drag preview"""
-        if not hasattr(self, 'drag_data') or not self.drag_data:
-            return
-            
-        widget = self.drag_data['widget']
-        
-        # Create preview window
-        self.drag_preview = tk.Toplevel(self.root)
-        self.drag_preview.overrideredirect(1)
-        self.drag_preview.attributes('-alpha', 0.7)
-        self.drag_preview.attributes('-topmost', True)
-        
-        # Copy thumbnail image to preview
-        image_label = widget.winfo_children()[0]
-        preview = tk.Label(self.drag_preview, image=image_label.image,
-                         bg=widget.cget('bg'))
-        preview.pack()
-        
-        # Position preview at mouse
-        self.drag_preview.geometry(f"+{event.x_root}+{event.y_root}")
-
-    def toggle_play(self):
-        """Toggle video playback"""
-        if self.current_video is None:
-            return
-            
-        self.video_playing = not self.video_playing
-        self.play_button.configure(text="⏸" if self.video_playing else "▶")
-
-    def on_slider_change(self, value):
-        """Handle time slider change"""
-        if self.current_video is None:
-            return
-            
-        # Convert slider value (0-100) to frame position
-        frame_pos = int(float(value) * self.frame_count / 100)
-        self.current_video.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-        self.current_frame_pos = frame_pos
-        
-        # Update time label
-        self.update_time_label()
-        
-        # Read and display the frame
-        success, frame = self.current_video.read()
-        if success:
-            self.show_frame(frame)
-
-    def update_time_label(self):
-        """Update the time label with current/total duration"""
-        if self.current_video is None or self.fps == 0:
-            return
-            
-        current_time = self.current_frame_pos / self.fps
-        total_time = self.frame_count / self.fps
-        
-        current_min = int(current_time // 60)
-        current_sec = int(current_time % 60)
-        total_min = int(total_time // 60)
-        total_sec = int(total_time % 60)
-        
-        self.time_label.configure(
-            text=f"{current_min:02d}:{current_sec:02d} / {total_min:02d}:{total_sec:02d}"
-        )
-
-    def update_video_frame(self):
-        """Update video frame in preview"""
-        if self.current_video is not None and self.video_playing:
-            success, frame = self.current_video.read()
+            success, frame = cap.read()
             if success:
-                self.show_frame(frame)
-                self.current_frame_pos += 1
-                
-                # Update slider position
-                if self.frame_count > 0:
-                    slider_value = (self.current_frame_pos / self.frame_count) * 100
-                    self.time_slider.set(slider_value)
-                
-                # Update time label
-                self.update_time_label()
-                
-                # Loop video if at end
-                if self.current_frame_pos >= self.frame_count:
-                    self.current_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.current_frame_pos = 0
+                # Convert to QImage and scale for thumbnail
+                height, width, channel = frame.shape
+                bytes_per_line = 3 * width
+                q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+                thumbnail_pixmap = QPixmap.fromImage(q_image).scaled(150, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             else:
-                # Reset video if we couldn't read a frame
-                self.current_video.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                self.current_frame_pos = 0
-        
-        # Schedule next frame update
-        self.root.after(33, self.update_video_frame)  # ~30 FPS
+                # Create a placeholder if frame cannot be read
+                thumbnail_pixmap = QPixmap(150, 100)
+                thumbnail_pixmap.fill(QColor("gray"))
+                painter = QPainter(thumbnail_pixmap)
+                painter.setPen(Qt.white)
+                painter.setFont(QFont("Segoe UI", 10))
+                painter.drawText(thumbnail_pixmap.rect(), Qt.AlignCenter, "No Preview")
+                painter.end()
 
-    def show_frame(self, frame):
-        """Display a frame in the preview canvas"""
-        if frame is None:
+
+            # Get video duration
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration_sec = frame_count / fps if fps > 0 else 0
+            cap.release()
+
+            # Create a widget for the thumbnail item
+            thumbnail_widget = QFrame(self.media_scroll_area_content)
+            thumbnail_widget.setStyleSheet("border: 1px solid #444; background-color: #232323;")
+            thumbnail_layout = QVBoxLayout(thumbnail_widget)
+            thumbnail_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+            thumbnail_layout.setContentsMargins(5, 5, 5, 5)
+
+            # Thumbnail image label
+            image_label = QLabel(thumbnail_widget)
+            image_label.setPixmap(thumbnail_pixmap)
+            image_label.setAlignment(Qt.AlignCenter)
+            thumbnail_layout.addWidget(image_label)
+
+            # Filename label
+            filename = os.path.basename(video_path)
+            name_label = QLabel(filename, thumbnail_widget)
+            name_label.setStyleSheet("color: white; border: none;") # Remove border from label
+            name_label.setAlignment(Qt.AlignCenter)
+            name_label.setWordWrap(True) # Wrap long filenames
+            thumbnail_layout.addWidget(name_label)
+
+            # Duration label
+            minutes = int(duration_sec // 60)
+            seconds = int(duration_sec % 60)
+            duration_str = f"{minutes:02d}:{seconds:02d}"
+            duration_label = QLabel(duration_str, thumbnail_widget)
+            duration_label.setStyleSheet("color: yellow; font-size: 9pt; border: none;") # Remove border from label
+            duration_label.setAlignment(Qt.AlignCenter)
+            thumbnail_layout.addWidget(duration_label)
+
+            # Store video path and duration in the widget for drag and drop
+            thumbnail_widget.video_path = video_path
+            thumbnail_widget.video_duration = duration_sec
+            thumbnail_widget.video_frame_count = frame_count # Store frame count
+            thumbnail_widget.video_fps = fps # Store fps
+
+
+            self.media_scroll_area_layout.addWidget(thumbnail_widget)
+            self.thumbnail_widgets.append(thumbnail_widget)
+
+            # Enable drag and drop for the thumbnail widget
+            self.enable_drag_drop(thumbnail_widget)
+
+            # Bind double click to load clip into preview
+            thumbnail_widget.mouseDoubleClickEvent = lambda event: self.load_clip_into_preview(video_path)
+
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to process video: {os.path.basename(video_path)}\n{e}")
+
+
+    def enable_drag_drop(self, widget):
+        """Enable drag and drop functionality for a widget."""
+        # For simplicity, we'll handle drag and drop manually.
+        # A more robust implementation might use QMimeData and dragEnterEvent/dropEvent.
+        widget.mousePressEvent = lambda event: self.on_drag_start(event, widget)
+        widget.mouseMoveEvent = lambda event: self.on_drag_motion(event, widget)
+        widget.mouseReleaseEvent = lambda event: self.on_drag_stop(event, widget)
+
+    def on_drag_start(self, event, widget):
+        """Handle drag start for a thumbnail widget."""
+        if event.button() == Qt.LeftButton:
+            widget._drag_start_pos = event.pos() # Position relative to the widget
+            widget._is_dragging = False # Flag to check if actual drag starts
+
+    def on_drag_motion(self, event, widget):
+        """Handle drag motion for a thumbnail widget."""
+        if event.buttons() & Qt.LeftButton:
+            # Check if the mouse has moved beyond a certain threshold to start dragging
+            if not hasattr(widget, '_is_dragging') or not widget._is_dragging:
+                 if (event.pos() - widget._drag_start_pos).manhattanLength() > QApplication.startDragDistance():
+                     widget._is_dragging = True
+                     # Start the drag operation (optional, for visual feedback)
+                     # Create a QPixmap of the widget for drag visual
+                     pixmap = widget.grab()
+                     drag = QDrag(widget)
+                     # Store video path and duration in QMimeData
+                     mime_data = QMimeData()
+                     # Use a custom MIME type for our clip data
+                     mime_type = "application/x-video-clip-data"
+                     # Package data into a QByteArray
+                     data = QByteArray()
+                     stream = QDataStream(data, QIODevice.WriteOnly)
+                     stream.writeQString(widget.video_path)
+                     stream.writeDouble(widget.video_duration)
+                     stream.writeInt(widget.video_frame_count)
+                     stream.writeDouble(widget.video_fps)
+                     # You could also include thumbnail pixmap data here if needed
+                     mime_data.setData(mime_type, data)
+
+                     drag.setMimeData(mime_data)
+                     drag.setPixmap(pixmap)
+                     # Set the hotspot (the point on the pixmap that is under the cursor)
+                     drag.setHotSpot(event.pos())
+
+                     # Execute the drag
+                     drag.exec_(Qt.CopyAction | Qt.MoveAction)
+
+
+            # If dragging, you might update a drag preview window position here
+            # (similar to the Tkinter version, but using PyQt widgets)
+            # This is handled by the QDrag object when exec_() is called
+
+
+    def on_drag_stop(self, event, widget):
+        """Handle drag stop for a thumbnail widget."""
+        # The drop handling is typically done in the target widget's dropEvent
+        # In this case, the timeline_view would need to implement dragEnterEvent and dropEvent.
+        # For the manual drag handling here, we just need to reset the drag flag.
+        if hasattr(widget, '_is_dragging'):
+            widget._is_dragging = False # Reset drag flag
+        widget._drag_start_pos = None # Reset drag start position
+
+
+    def load_clip_into_preview(self, video_path):
+        """Loads the specified video clip into the preview pane for playback."""
+        if not os.path.exists(video_path):
+            QMessageBox.warning(self, "File Not Found", f"Video file not found: {os.path.basename(video_path)}")
             return
-            
-        # Resize frame to fit preview canvas while maintaining aspect ratio
-        canvas_width = self.preview_canvas.winfo_width()
-        canvas_height = self.preview_canvas.winfo_height()
-        
-        frame_height, frame_width = frame.shape[:2]
-        scale = min(canvas_width/frame_width, canvas_height/frame_height)
-        
-        if scale < 1:
-            new_width = int(frame_width * scale)
-            new_height = int(frame_height * scale)
-            frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
-        
-        # Convert frame to PhotoImage
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(frame)
-        photo = ImageTk.PhotoImage(image=image)
-        
-        # Update canvas
-        self.preview_canvas.delete("all")
-        self.current_frame = photo  # Keep a reference!
-        
-        # Center the frame in canvas
-        x = (canvas_width - frame.shape[1]) // 2
-        y = (canvas_height - frame.shape[0]) // 2
-        self.preview_canvas.create_image(x, y, image=photo, anchor="nw")
 
-    def open_video_preview(self, filename):
-        """Open a video file in the preview panel"""
-        video_path = os.path.join(self.project_path, filename)
-        
-        # Close current video if one is open
+        # Stop current playback if any
+        self.stop_video()
+
+        try:
+            # Open the new video file
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                QMessageBox.warning(self, "Error", f"Could not open video file: {os.path.basename(video_path)}")
+                return
+
+            # Update video playback variables
+            self.current_video = cap
+            self.current_video_path = video_path # Store current video path
+            self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = cap.get(cv2.CAP_PROP_FPS)
+            self.video_duration = self.frame_count / self.fps if self.fps > 0 else 0
+            self.current_frame_pos = 0 # Start from the beginning of the loaded clip
+
+            # Update time slider and label
+            self.time_slider.setRange(0, int(self.video_duration * 1000)) # Use milliseconds for better precision
+            self.time_slider.setValue(0)
+            self.update_time_label()
+
+            # Start the video timer
+            if self.fps > 0:
+                 self.video_timer.start(int(1000 / self.fps)) # Set timer interval based on FPS
+            else:
+                 self.video_timer.start(33) # Default to ~30 FPS if fps is 0
+
+
+            print(f"Loaded clip: {os.path.basename(video_path)} into preview.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error loading video for preview: {e}")
+            self.stop_video() # Ensure cleanup if an error occurs
+
+
+    def stop_video(self):
+        """Stops video playback and releases the video capture object."""
+        self.video_playing = False
+        self.video_timer.stop() # Stop the timer
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay)) # Set play icon
+
         if self.current_video is not None:
             self.current_video.release()
-            self.video_playing = False
-            self.play_button.configure(text="▶")
-        
-        # Open new video
-        self.current_video = cv2.VideoCapture(video_path)
-        if self.current_video.isOpened():
-            # Get video properties
-            self.frame_count = int(self.current_video.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.fps = self.current_video.get(cv2.CAP_PROP_FPS)
-            self.current_frame_pos = 0
-            
-            # Read first frame
-            success, frame = self.current_video.read()
-            if success:
-                self.show_frame(frame)
-                self.update_time_label()
-            
-            # Reset slider
-            self.time_slider.set(0)
-        else:
-            messagebox.showerror("Error", f"Could not open video: {filename}")
             self.current_video = None
+            self.current_video_path = None # Clear current video path
+            self.frame_count = 0
+            self.fps = 0
+            self.video_duration = 0
+            self.current_frame_pos = 0
+            # Reset slider range and position
+            self.time_slider.setRange(0, 0)
+            self.time_slider.setValue(0)
+            self.update_time_label() # Update time label to 00:00 / 00:00
+
+        # Clear preview label
+        self.preview_label.clear()
+        self.preview_label.setText("Preview") # Show placeholder text
+
+
+    def export_timeline(self):
+        """Export the timeline as a single video."""
+        timeline_clips_data = self.timeline_view.scene.get_clips_data() # Get clip data from PyQt timeline scene
+        if not timeline_clips_data:
+            QMessageBox.information(self, "Export", "No clips in timeline to export.")
+            return
+
+        # Get output path
+        output_path, _ = QFileDialog.getSaveFileName(self, "Export Timeline", "", "MP4 files (*.mp4);;All files (*.*)")
+        if not output_path:
+            return
+
+        # Sort clips by start time
+        sorted_clips = sorted(timeline_clips_data, key=lambda x: x.get('start_time', 0))
+
+        try:
+            # Initialize video writer
+            first_valid_clip_data = None
+            for clip_data in sorted_clips:
+                clip_path = clip_data.get('video_path')
+                if clip_path and os.path.exists(clip_path):
+                     first_valid_clip_data = clip_data
+                     break
+
+            if not first_valid_clip_data:
+                 QMessageBox.critical(self, "Export Error", "No valid video files found in timeline clips.")
+                 return
+
+            first_clip_cap = cv2.VideoCapture(first_valid_clip_data['video_path'])
+            if not first_clip_cap.isOpened():
+                 QMessageBox.critical(self, "Export Error", f"Could not open the first clip for export: {os.path.basename(first_valid_clip_data['video_path'])}")
+                 return
+
+            frame_width = int(first_clip_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(first_clip_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = first_clip_cap.get(cv2.CAP_PROP_FPS)
+            first_clip_cap.release()
+
+            if fps == 0:
+                 QMessageBox.critical(self, "Export Error", "Cannot determine frame rate from the first clip.")
+                 return
+
+            # Define the codec and create VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Or 'XVID', 'MJPG'
+            out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+
+            if not out.isOpened():
+                 QMessageBox.critical(self, "Export Error", "Could not initialize video writer. Check codec availability or file path permissions.")
+                 return
+
+            # Process each clip
+            for clip_data in sorted_clips:
+                video_path = clip_data.get('video_path')
+                if not video_path or not os.path.exists(video_path):
+                     print(f"Warning: Skipping missing clip file during export: {os.path.basename(video_path if video_path else 'N/A')}")
+                     continue
+
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                     print(f"Warning: Could not open clip for reading during export: {os.path.basename(video_path)}")
+                     continue
+
+                # Read and write frames from the clip
+                # In a real editor, you'd handle trimming/splitting based on clip_data start/end points
+                # For this simple export, we just concatenate the full clips in order
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    # Ensure frame size matches the output writer size (simple resizing for now)
+                    if frame.shape[1] != frame_width or frame.shape[0] != frame_height:
+                         frame = cv2.resize(frame, (frame_width, frame_height))
+                    out.write(frame)
+                cap.release()
+
+            out.release()
+            QMessageBox.information(self, "Export", "Timeline exported successfully!")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export timeline: {str(e)}")
+        finally:
+            if 'out' in locals() and out.isOpened():
+                 out.release()
+
+
+    def toggle_play(self):
+        """Toggle video playback."""
+        if self.current_video is None:
+            # If no video is loaded in preview, try to load the clip at the current playhead position
+            timeline_clips_data = self.timeline_view.scene.get_clips_data()
+            if timeline_clips_data:
+                playhead_x = self.timeline_view.scene.playhead_item.pos().x()
+                playhead_time = playhead_x / self.timeline_view.timeline_scale
+
+                target_clip_data = None
+                # Find the clip the playhead is currently over
+                for clip_data in sorted(timeline_clips_data, key=lambda x: x.get('start_time', 0)):
+                     clip_start_time = clip_data.get('start_time', 0)
+                     clip_duration = clip_data.get('duration', 0)
+                     if clip_start_time <= playhead_time < clip_start_time + clip_duration:
+                         target_clip_data = clip_data
+                         break
+                     elif playhead_time < clip_start_time:
+                          # Playhead is before this clip, so the previous clip (if any) or no clip is the target
+                          break # Since clips are sorted, no need to check further
+
+                # If playhead is before the first clip, load the first clip
+                if target_clip_data is None and timeline_clips_data:
+                     target_clip_data = sorted(timeline_clips_data, key=lambda x: x.get('start_time', 0))[0]
+                     # Adjust playhead to the start of the first clip if it was before it
+                     if playhead_time < target_clip_data.get('start_time', 0):
+                          self.on_playhead_move(target_clip_data.get('start_time', 0) * self.timeline_view.timeline_scale)
+
+
+                if target_clip_data and target_clip_data.get('video_path'):
+                    self.load_clip_into_preview(target_clip_data['video_path'])
+                    # Set playback position within the newly loaded clip based on timeline playhead time
+                    time_in_clip = playhead_time - target_clip_data.get('start_time', 0)
+                    if self.current_video is not None and self.fps > 0:
+                         frame_position = int(time_in_clip * self.fps)
+                         frame_position = max(0, min(frame_position, self.frame_count - 1))
+                         self.current_video.set(cv2.CAP_PROP_POS_FRAMES, frame_position)
+                         self.current_frame_pos = frame_position
+                         self.update_time_label()
+                         # Update the slider based on the position within the new clip's duration
+                         if self.video_duration > 0:
+                              slider_value = (time_in_clip / self.video_duration) * self.time_slider.maximum() # Scale to slider range (milliseconds)
+                              self.time_slider.blockSignals(True) # Block signals to prevent recursive calls
+                              self.time_slider.setValue(int(slider_value))
+                              self.time_slider.blockSignals(False) # Unblock signals
+
+
+                else:
+                     QMessageBox.information(self, "Playback", "No valid clip found at the current playhead position.")
+                     return # Exit if no valid clip or path
+
+            else:
+                 QMessageBox.information(self, "Playback", "No clips on the timeline to play.")
+                 return # Exit if no clips on timeline
+
+
+        # If a video is already loaded, just toggle play/pause
+        if self.current_video is not None:
+            self.video_playing = not self.video_playing
+            if self.video_playing:
+                self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause)) # Set pause icon
+                if not self.video_timer.isActive():
+                     if self.fps > 0:
+                          self.video_timer.start(int(1000 / self.fps))
+                     else:
+                          self.video_timer.start(33) # Default to ~30 FPS
+            else:
+                self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay)) # Set play icon
+                self.video_timer.stop()
+
+
+    def update_video_frame(self):
+        """Update video frame in preview and move timeline playhead."""
+        if self.current_video is not None and self.video_playing:
+            ret, frame = self.current_video.read()
+            if ret:
+                self.current_frame_pos += 1
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # Convert to QImage and then QPixmap for the QLabel
+                height, width, channel = frame.shape
+                bytes_per_line = 3 * width
+                q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(q_image)
+
+                # Scale pixmap to fit the preview label while maintaining aspect ratio
+                scaled_pixmap = pixmap.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.preview_label.setPixmap(scaled_pixmap)
+                self.preview_label.setAlignment(Qt.AlignCenter) # Center the image
+
+
+                self.update_time_label()
+
+                # Update slider position based on current frame (using time in seconds)
+                if self.fps > 0:
+                    current_time_in_clip = self.current_frame_pos / self.fps
+                    if self.video_duration > 0:
+                         slider_value = (current_time_in_clip / self.video_duration) * self.time_slider.maximum() # Scale to slider range (milliseconds)
+                         self.time_slider.blockSignals(True) # Block signals to prevent recursive calls
+                         self.time_slider.setValue(int(slider_value))
+                         self.time_slider.blockSignals(False) # Unblock signals
+
+
+                # Move timeline playhead
+                # Calculate time in seconds within the current clip
+                time_in_current_clip = self.current_frame_pos / self.fps if self.fps > 0 else 0
+
+                # Find the start time of the current clip on the timeline
+                current_clip_start_time = 0
+                if self.current_video_path:
+                     timeline_clips_data = self.timeline_view.scene.get_clips_data()
+                     for clip_data in timeline_clips_data:
+                         if clip_data.get('video_path') == self.current_video_path:
+                             current_clip_start_time = clip_data.get('start_time', 0)
+                             break
+
+                # Calculate the absolute time on the timeline
+                absolute_timeline_time = current_clip_start_time + time_in_current_clip
+
+                # Calculate the corresponding playhead position in pixels
+                playhead_pixel_pos = absolute_timeline_time * self.timeline_view.timeline_scale
+                self.timeline_view.move_playhead_to_scene_pos(playhead_pixel_pos)
+
+
+            else:
+                # End of video or error reading frame
+                self.video_playing = False
+                self.video_timer.stop()
+                self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay)) # Set play icon
+
+                # Set frame position and slider to the end of the video
+                self.current_frame_pos = self.frame_count
+                self.update_time_label()
+                self.time_slider.blockSignals(True)
+                self.time_slider.setValue(self.time_slider.maximum())
+                self.time_slider.blockSignals(False)
+
+                # Optionally, reset playhead to the end of the clip or move to the next clip
+                # For now, it stops at the end of the currently loaded clip.
+                # To move to the next clip, you'd need to find the next clip on the timeline
+                # and call load_clip_into_preview with its path and set the playhead position.
+
+
+    def update_time_label(self):
+        """Update the time display label."""
+        current_msec = int((self.current_frame_pos / self.fps) * 1000) if self.fps > 0 else 0
+        total_msec = int(self.video_duration * 1000)
+
+        current_time = QTime(0, 0).addMSecs(current_msec)
+        total_time = QTime(0, 0).addMSecs(total_msec)
+
+        # Format time based on total duration (HH:MM:SS or MM:SS)
+        if total_msec >= 3600000: # Use HH:MM:SS if total duration is an hour or more
+             time_text = f"{current_time.toString('HH:mm:ss')} / {total_time.toString('HH:mm:ss')}"
+        else: # Use MM:SS
+             time_text = f"{current_time.toString('mm:ss')} / {total_time.toString('mm:ss')}"
+
+        self.time_label.setText(time_text)
+
+
+    def on_slider_change_time(self, value):
+        """Handle time slider change - based on milliseconds."""
+        if self.current_video is not None and self.fps > 0:
+            # Convert slider value (milliseconds) to frame position
+            time_in_seconds = value / 1000.0
+            frame_position = int(time_in_seconds * self.fps)
+
+            # Ensure frame position is within bounds
+            frame_position = max(0, min(frame_position, self.frame_count - 1))
+
+            # Only update video frame if the position has changed significantly
+            if abs(frame_position - self.current_frame_pos) > 1: # Check for more than 1 frame difference
+                self.current_video.set(cv2.CAP_PROP_POS_FRAMES, frame_position)
+                self.current_frame_pos = frame_position
+                self.update_time_label()
+
+                # Move timeline playhead based on slider change within the current clip
+                time_in_current_clip = self.current_frame_pos / self.fps if self.fps > 0 else 0
+                current_clip_start_time = 0
+                if self.current_video_path:
+                     timeline_clips_data = self.timeline_view.scene.get_clips_data()
+                     for clip_data in timeline_clips_data:
+                         if clip_data.get('video_path') == self.current_video_path:
+                             current_clip_start_time = clip_data.get('start_time', 0)
+                             break
+
+                absolute_timeline_time = current_clip_start_time + time_in_current_clip
+                playhead_pixel_pos = absolute_timeline_time * self.timeline_view.timeline_scale
+                self.timeline_view.move_playhead_to_scene_pos(playhead_pixel_pos)
+
+
+    def on_playhead_move(self, x_pos):
+        """Handle playhead movement in timeline (triggered by timeline view)."""
+        # Convert playhead pixel position to time in seconds
+        timeline_time_in_seconds = x_pos / self.timeline_view.timeline_scale
+
+        # Find which clip on the timeline corresponds to this time
+        target_clip_data = None
+        clip_start_time = 0
+
+        timeline_clips_data = self.timeline_view.scene.get_clips_data()
+        # Sort clips by start time to make this efficient
+        sorted_clips = sorted(timeline_clips_data, key=lambda x: x.get('start_time', 0))
+
+        for clip_data in sorted_clips:
+             clip_start_time = clip_data.get('start_time', 0)
+             clip_duration = clip_data.get('duration', 0)
+             # Check if the timeline time falls within this clip's duration (with a small tolerance)
+             if clip_start_time <= timeline_time_in_seconds < clip_start_time + clip_duration + 0.001: # Add tolerance
+                 target_clip_data = clip_data
+                 break # Found the clip
+
+        if target_clip_data:
+            # Calculate the time position within the target clip
+            time_in_target_clip = timeline_time_in_seconds - clip_start_time
+
+            # If the playhead moved to a different clip than the one currently in preview
+            if self.current_video_path != target_clip_data.get('video_path'):
+                print(f"Playhead moved to a new clip: {os.path.basename(target_clip_data.get('video_path', 'N/A'))}")
+                # Load the new clip into the preview
+                video_path = target_clip_data.get('video_path')
+                if video_path:
+                    self.load_clip_into_preview(video_path)
+                    # Set the frame position within the newly loaded clip
+                    if self.current_video is not None and self.fps > 0:
+                        frame_position = int(time_in_target_clip * self.fps)
+                        # Ensure frame position is within bounds of the new clip
+                        frame_position = max(0, min(frame_position, self.frame_count - 1))
+                        self.current_video.set(cv2.CAP_PROP_POS_FRAMES, frame_position)
+                        self.current_frame_pos = frame_position
+                        self.update_time_label()
+                        # Update the slider based on the position within the new clip's duration
+                        if self.video_duration > 0:
+                             slider_value = (time_in_target_clip / self.video_duration) * self.time_slider.maximum()
+                             self.time_slider.blockSignals(True)
+                             self.time_slider.setValue(int(slider_value))
+                             self.time_slider.blockSignals(False)
+
+
+            # If the playhead is still within the same clip that's in preview
+            elif self.current_video is not None and self.fps > 0:
+                 # Update the frame position in the current video
+                 time_in_current_clip = timeline_time_in_seconds - clip_start_time # Recalculate based on current playhead position
+                 frame_position = int(time_in_current_clip * self.fps)
+                 # Ensure frame position is within bounds
+                 frame_position = max(0, min(frame_position, self.frame_count - 1))
+
+                 # Only update video frame if the position has changed significantly
+                 if abs(frame_position - self.current_frame_pos) > 1: # Check for more than 1 frame difference
+                     self.current_video.set(cv2.CAP_PROP_POS_FRAMES, frame_position)
+                     self.current_frame_pos = frame_position
+                     self.update_time_label()
+                     # Update the slider based on the position within the current clip's duration
+                     if self.video_duration > 0:
+                         slider_value = (time_in_current_clip / self.video_duration) * self.time_slider.maximum()
+                         self.time_slider.blockSignals(True)
+                         self.time_slider.setValue(int(slider_value))
+                         self.time_slider.blockSignals(False)
+
+        else:
+            # Playhead is not over any clip. Stop playback and clear preview.
+            self.stop_video()
+            # Clear preview label
+            self.preview_label.clear()
+            self.preview_label.setText("Preview") # Show placeholder text
+            self.time_label.setText("00:00 / 00:00")
+            self.time_slider.setRange(0, 0)
+            self.time_slider.setValue(0)
+
+    def show_timeline_clip_context_menu(self, clip_item, scene_pos):
+        """Show context menu for a timeline clip."""
+        menu = QMenu(self)
+        # Add actions to the menu
+        split_action = menu.addAction("Split at Playhead")
+        trim_start_action = menu.addAction("Trim Start to Playhead")
+        trim_end_action = menu.addAction("Trim End to Playhead")
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete Clip")
+
+        # Connect actions to slots
+        split_action.triggered.connect(lambda: self.split_timeline_clip(clip_item))
+        trim_start_action.triggered.connect(lambda: self.trim_timeline_clip_start(clip_item))
+        trim_end_action.triggered.connect(lambda: self.trim_timeline_clip_end(clip_item))
+        delete_action.triggered.connect(lambda: self.delete_timeline_clip(clip_item))
+
+        # Show the menu at the global position of the mouse event
+        menu.exec_(self.timeline_view.mapToGlobal(self.timeline_view.mapFromScene(scene_pos)))
+
+
+    def split_timeline_clip(self, clip_item):
+        """Split the given timeline clip at the current playhead position."""
+        playhead_x = self.timeline_view.scene.playhead_item.pos().x()
+        clip_x = clip_item.pos().x()
+        clip_width = clip_item.rect().width()
+
+        # Check if playhead is within the clip's horizontal bounds (with tolerance)
+        tolerance = 1 # pixels
+        if playhead_x <= clip_x + tolerance or playhead_x >= clip_x + clip_width - tolerance:
+            QMessageBox.information(self, "Split Clip", "Playhead must be positioned within the clip.")
+            return
+
+        # Calculate split point in time
+        timeline_scale = self.timeline_view.timeline_scale
+        playhead_time = playhead_x / timeline_scale
+        clip_start_time = clip_item.clip_data.get('start_time', 0)
+        clip_duration = clip_item.clip_data.get('duration', 0)
+        clip_fps = clip_item.clip_data.get('fps', 0)
+
+        time_in_clip = playhead_time - clip_start_time
+
+        # Calculate new durations and frame counts
+        first_part_duration = time_in_clip
+        second_part_duration = clip_duration - time_in_clip
+
+        first_part_frames = int(first_part_duration * clip_fps) if clip_fps > 0 else 0
+        second_part_frames = clip_item.clip_data.get('frame_count', 0) - first_part_frames
+
+
+        # Update the first part (the original clip item)
+        clip_item.clip_data['duration'] = first_part_duration
+        clip_item.clip_data['frame_count'] = first_part_frames
+        # Update visual width
+        new_width = max(50, int(first_part_duration * timeline_scale))
+        clip_item.setRect(clip_item.rect().x(), clip_item.rect().y(), new_width, clip_item.rect().height())
+        clip_item.text_item.setTextWidth(new_width - 10) # Update text wrap
+
+        # Create data for the second part (new clip)
+        second_part_data = clip_item.clip_data.copy() # Copy existing data
+        second_part_data['duration'] = second_part_duration
+        second_part_data['frame_count'] = second_part_frames
+        second_part_data['start_time'] = playhead_time # New start time is playhead time
+        second_part_data['filename'] = os.path.basename(second_part_data.get('video_path', 'Unknown')) + " (2)" # Rename
+
+
+        # Add the second part as a new clip item
+        # Position the new clip at the playhead's x position and the same track y
+        new_clip_item = self.timeline_view.scene.add_clip(second_part_data, playhead_x, clip_item.pos().y())
+
+        # Deselect all and select the two new parts (original updated and new)
+        self.timeline_view.scene.clearSelection()
+        clip_item.setSelected(True)
+        if new_clip_item:
+             new_clip_item.setSelected(True)
+
+        # Update scene rectangle
+        self.timeline_view.scene.update_scene_rect()
+
+
+    def trim_timeline_clip_start(self, clip_item):
+        """Trim the start of the given timeline clip to the current playhead position."""
+        playhead_x = self.timeline_view.scene.playhead_item.pos().x()
+        clip_x = clip_item.pos().x()
+        clip_width = clip_item.rect().width()
+
+        # Check if playhead is within the clip's horizontal bounds (with tolerance)
+        tolerance = 1 # pixels
+        if playhead_x <= clip_x + tolerance or playhead_x >= clip_x + clip_width - tolerance:
+            QMessageBox.information(self, "Trim Clip", "Playhead must be positioned within the clip.")
+            return
+
+        # Calculate trim point in time
+        timeline_scale = self.timeline_view.timeline_scale
+        playhead_time = playhead_x / timeline_scale
+        clip_start_time = clip_item.clip_data.get('start_time', 0)
+        clip_duration = clip_item.clip_data.get('duration', 0)
+        clip_fps = clip_item.clip_data.get('fps', 0)
+
+        time_to_trim = playhead_time - clip_start_time
+
+        # Calculate new duration and frame count
+        new_duration = clip_duration - time_to_trim
+        trimmed_frames = int(time_to_trim * clip_fps) if clip_fps > 0 else 0
+        new_frame_count = clip_item.clip_data.get('frame_count', 0) - trimmed_frames
+
+        # Update the clip data
+        clip_item.clip_data['start_time'] = playhead_time # New start time is playhead time
+        clip_item.clip_data['duration'] = new_duration
+        clip_item.clip_data['frame_count'] = new_frame_count
+
+        # Update visual representation (position and width)
+        new_width = max(50, int(new_duration * timeline_scale))
+        clip_item.setPos(playhead_x, clip_item.pos().y()) # New position is playhead x
+        clip_item.setRect(0, 0, new_width, clip_item.rect().height()) # Rect relative to item's new position
+        clip_item.text_item.setTextWidth(new_width - 10) # Update text wrap
+
+        # Update scene rectangle
+        self.timeline_view.scene.update_scene_rect()
+
+
+    def trim_timeline_clip_end(self, clip_item):
+        """Trim the end of the given timeline clip to the current playhead position."""
+        playhead_x = self.timeline_view.scene.playhead_item.pos().x()
+        clip_x = clip_item.pos().x()
+        clip_width = clip_item.rect().width()
+
+        # Check if playhead is within the clip's horizontal bounds (with tolerance)
+        tolerance = 1 # pixels
+        if playhead_x <= clip_x + tolerance or playhead_x >= clip_x + clip_width - tolerance:
+            QMessageBox.information(self, "Trim Clip", "Playhead must be positioned within the clip.")
+            return
+
+        # Calculate trim point in time
+        timeline_scale = self.timeline_view.timeline_scale
+        playhead_time = playhead_x / timeline_scale
+        clip_start_time = clip_item.clip_data.get('start_time', 0)
+        clip_duration = clip_item.clip_data.get('duration', 0)
+        clip_fps = clip_item.clip_data.get('fps', 0)
+
+        time_to_trim = (clip_start_time + clip_duration) - playhead_time
+
+        # Calculate new duration and frame count
+        new_duration = clip_duration - time_to_trim
+        trimmed_frames = int(time_to_trim * clip_fps) if clip_fps > 0 else 0
+        new_frame_count = clip_item.clip_data.get('frame_count', 0) - trimmed_frames # This might not be accurate for trimming end
+
+        # Recalculate frame count based on new duration and original start frame
+        # This requires knowing the original start frame index of the clip, which is not stored.
+        # For simplicity, let's just update the duration and visual width for now.
+        # A more robust implementation would track original start frame index.
+        new_frame_count = int(new_duration * clip_fps) if clip_fps > 0 else 0
+
+
+        # Update the clip data
+        clip_item.clip_data['duration'] = new_duration
+        clip_item.clip_data['frame_count'] = new_frame_count # Update frame count based on new duration
+
+
+        # Update visual representation (width)
+        new_width = max(50, int(new_duration * timeline_scale))
+        # The position remains the same, only the width changes
+        clip_item.setRect(clip_item.rect().x(), clip_item.rect().y(), new_width, clip_item.rect().height())
+        clip_item.text_item.setTextWidth(new_width - 10) # Update text wrap
+
+
+        # Update scene rectangle
+        self.timeline_view.scene.update_scene_rect()
+
+
+    def delete_timeline_clip(self, clip_item):
+        """Delete the given timeline clip from the scene."""
+        if clip_item in self.timeline_view.scene.timeline_clips_items:
+            # Remove from scene's lists
+            self.timeline_view.scene.timeline_clips_items.remove(clip_item)
+            if clip_item.clip_data in self.timeline_view.scene.timeline_data:
+                self.timeline_view.scene.timeline_data.remove(clip_item.clip_data)
+
+            # Remove from the scene
+            self.timeline_view.scene.removeItem(clip_item)
+
+            # Update the scene rectangle after deletion
+            self.timeline_view.scene.update_scene_rect()
+
+            # Emit selection changed signal as selected items are deleted
+            self.timeline_view.scene.selectionChanged.emit() # Emit from the scene
+
+
+    def delete_selected_timeline_clips(self):
+        """Delete all selected clips from the timeline."""
+        selected_items = self.timeline_view.scene.selectedItems()
+        if not selected_items:
+            return
+
+        # Confirmation dialog (optional)
+        # reply = QMessageBox.question(self, 'Delete Clips', 'Are you sure you want to delete the selected clips?',
+        #                              QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        # if reply == QMessageBox.No:
+        #     return
+
+        # Create a list of clips to delete to avoid modifying the list while iterating
+        clips_to_delete = [item for item in selected_items if isinstance(item, PyQtTimelineClip)]
+
+        for clip_item in clips_to_delete:
+            self.delete_timeline_clip(clip_item) # Use the single clip deletion logic
+
+
+    def on_timeline_selection_changed(self):
+        """Handle selection changes in the timeline view."""
+        # This slot is connected to the timeline_view.selectionChanged signal.
+        # You can use self.timeline_view.get_selected_clips_data() to get the selected clips' data.
+        # Example: print the number of selected clips
+        # print(f"Timeline selection changed. Selected clips: {len(self.timeline_view.get_selected_clips_data())}")
+        pass # Implement logic based on timeline selection if needed
+
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = VideoEditorApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    # Set a dark fusion style (optional)
+    app.setStyle("Fusion")
+    # Set a dark color palette (optional)
+    palette = app.palette()
+    palette.setColor(palette.Window, QColor(53, 53, 53))
+    palette.setColor(palette.WindowText, Qt.white)
+    palette.setColor(palette.Base, QColor(25, 25, 25))
+    palette.setColor(palette.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(palette.ToolTipBase, Qt.white)
+    palette.setColor(palette.ToolTipText, Qt.white)
+    palette.setColor(palette.Text, Qt.white)
+    palette.setColor(palette.Button, QColor(53, 53, 53))
+    palette.setColor(palette.ButtonText, Qt.white)
+    palette.setColor(palette.BrightText, Qt.red)
+    palette.setColor(palette.Link, QColor(42, 130, 218))
+    palette.setColor(palette.Highlight, QColor(42, 130, 218))
+    palette.setColor(palette.HighlightedText, Qt.black)
+    app.setPalette(palette)
+
+
+    mainWin = VideoEditorApp()
+    mainWin.show()
+    sys.exit(app.exec_())
